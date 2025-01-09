@@ -4,46 +4,64 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/smtp"
+	"strings"
 )
 
 // EmailService handles email operations
 type EmailService struct {
-	config *Config
+	config        *Config
+	templateStore *TemplateStore
 }
 
 // NewEmailService creates a new email service instance
-func NewEmailService(config *Config) *EmailService {
-	return &EmailService{
-		config: config,
+func NewEmailService(config *Config) (*EmailService, error) {
+	templateStore, err := NewTemplateStore(config.DatabaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create template store: %v", err)
 	}
+
+	return &EmailService{
+		config:        config,
+		templateStore: templateStore,
+	}, nil
 }
 
-// SendEmail sends an email using the configured SMTP settings
-func (s *EmailService) SendEmail(to []string, subject, body string) error {
-	// Create TLS config
+// SendMail is the main function to send emails using templates
+// messageType: type of message from database (e.g., "leave", "fee_reminder")
+// to: recipient email addresses
+// data: map of required fields (e.g., "student_name", "roll_number")
+func (s *EmailService) SendMail(messageType string, to []string, data map[string]string) error {
+	template, err := s.templateStore.GetTemplate(messageType)
+	if err != nil {
+		return fmt.Errorf("failed to get template: %v", err)
+	}
+
+	body := template.MessageTemplate
+	for key, value := range data {
+		placeholder := fmt.Sprintf("{%s}", key)
+		body = strings.Replace(body, placeholder, value, -1)
+	}
+
+	// Send email using SMTP
 	tlsConfig := &tls.Config{
 		ServerName: s.config.Server,
 	}
 
-	// Connect to the SMTP Server
 	conn, err := smtp.Dial(fmt.Sprintf("%s:%d", s.config.Server, s.config.Port))
 	if err != nil {
 		return fmt.Errorf("failed to connect to SMTP server: %v", err)
 	}
 	defer conn.Close()
 
-	// Start TLS
 	if err = conn.StartTLS(tlsConfig); err != nil {
 		return fmt.Errorf("failed to start TLS: %v", err)
 	}
 
-	// Auth
 	auth := smtp.PlainAuth("", s.config.Username, s.config.Password, s.config.Server)
 	if err = conn.Auth(auth); err != nil {
 		return fmt.Errorf("failed to authenticate: %v", err)
 	}
 
-	// Set the sender and recipient
 	if err = conn.Mail(s.config.Sender); err != nil {
 		return fmt.Errorf("failed to set sender: %v", err)
 	}
@@ -54,17 +72,15 @@ func (s *EmailService) SendEmail(to []string, subject, body string) error {
 		}
 	}
 
-	// Send the email body
 	wc, err := conn.Data()
 	if err != nil {
 		return fmt.Errorf("failed to create data writer: %v", err)
 	}
 	defer wc.Close()
 
-	// Construct email headers
 	message := fmt.Sprintf("From: %s\r\n", s.config.Sender)
 	message += fmt.Sprintf("To: %s\r\n", to[0])
-	message += fmt.Sprintf("Subject: %s\r\n", subject)
+	message += fmt.Sprintf("Subject: %s\r\n", template.Subject)
 	message += "MIME-Version: 1.0\r\n"
 	message += "Content-Type: text/plain; charset=\"utf-8\"\r\n"
 	message += "\r\n" + body
@@ -74,4 +90,9 @@ func (s *EmailService) SendEmail(to []string, subject, body string) error {
 	}
 
 	return nil
+}
+
+// Close closes the database connection
+func (s *EmailService) Close() error {
+	return s.templateStore.Close()
 }
